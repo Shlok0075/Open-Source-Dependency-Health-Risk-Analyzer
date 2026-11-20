@@ -50,13 +50,18 @@ def fixed_versions(vuln, name, eco, version):
     return sorted(out, key=vt)
 
 
-def fetch_vulns(name, version, eco):
-    """Ask OSV.dev (free) for known vulnerabilities of this exact version."""
+def fetch_vulns(name, version, eco, strict=False):
+    """Ask OSV.dev (free) for known vulnerabilities of this exact version.
+
+    strict=True raises when OSV cannot be reached, instead of answering "none".
+    """
     if not version:
         return []
     try:
         r = requests.post("https://api.osv.dev/v1/query", timeout=20, headers=HEADERS,
                           json={"version": version, "package": {"name": name, "ecosystem": eco}})
+        if r.status_code != 200:
+            raise RuntimeError("OSV returned %s" % r.status_code)
         found = []
         for v in r.json().get("vulns", []):
             sev = ((v.get("database_specific") or {}).get("severity") or "MODERATE").upper()
@@ -67,4 +72,6 @@ def fetch_vulns(name, version, eco):
                           "fixed": fixed_versions(v, name, eco, version)})
         return found
     except Exception:
+        if strict:
+            raise
         return []

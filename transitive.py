@@ -123,8 +123,15 @@ def analyze_transitive(deps):
     # which nested packages are vulnerable? (one batch call for everything)
     keys = sorted({(d["eco"], n, v) for d, (nodes, _, _) in roots for n, v in nodes[1:] if n and v})
     flagged = [k for k, bad in osv_has_vulns(keys).items() if bad]
+    def lookup(k):
+        try:
+            return fetch_vulns(k[1], k[2], k[0], strict=True)
+        except Exception as e:
+            errors.append({"name": "%s@%s" % (k[1], k[2]), "error": "vulnerability lookup failed: %s" % e})
+            return []
+
     with ThreadPoolExecutor(max_workers=10) as ex:
-        found = dict(zip(flagged, ex.map(lambda k: fetch_vulns(k[1], k[2], k[0]), flagged)))
+        found = dict(zip(flagged, ex.map(lookup, flagged)))
     vuln_of = {k: v for k, v in found.items() if v}
 
     tree, agg = [], {}

@@ -99,7 +99,7 @@
 let DATA = null, TRANS = null, TRANS_ERR = '', TRANS_LOADING = false, pie = null, line = null;
 let skipped = new Set(), fixRun = 0, transRun = 0;
 const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function analyze(){
   $('err').style.display = 'none';
@@ -146,7 +146,8 @@ async function render(d){
   pie = new Chart($('pie'), {type:'doughnut',
     data:{labels:['Low','Medium','High'],datasets:[{data:[cnt.Low,cnt.Medium,cnt.High],backgroundColor:['#2e9e5b','#e69a10','#d62d3a']}]}});
 
-  const h = await (await fetch('/api/history?project='+encodeURIComponent(d.project))).json();
+  let h = [];
+  try{ h = await (await fetch('/api/history?project='+encodeURIComponent(d.project))).json(); }catch(e){}
   if(line) line.destroy();
   line = new Chart($('line'), {type:'line',
     data:{labels:h.map(x=>x.created),datasets:[{label:'Health score',data:h.map(x=>x.health),borderColor:'#b51f2a',tension:.3}]},
@@ -280,9 +281,9 @@ async function renderFix(){
   if(no.length) h += '<p style="background:#fff4dc;padding:8px;border-radius:6px;font-size:13px"><b>No patched version exists yet for:</b> '+no.map(p=>esc(p.name)+' '+esc(p.current)).join(', ')+'</p>';
   h += '<div id="fixPreview"></div>';
   el.innerHTML = h;
+  const id = ++fixRun;          // also cancels any request still in flight
   if(!chosen.length) return;
 
-  const id = ++fixRun;
   try{
     const r = await fetch('/api/remediate', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({files: DATA.sources, updates: chosen.map(p=>({name:p.name, eco:p.eco, target:p.target}))})});

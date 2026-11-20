@@ -10,7 +10,7 @@ from remediation import suggest_fix, apply_fixes
 from transitive import analyze_transitive
 
 app = Flask(__name__, static_folder="static")
-DB = "history.db"
+DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.db")
 MAX_DEPS = 80
 
 
@@ -28,14 +28,21 @@ def init_db():
         vulnerable INTEGER, health REAL, risk TEXT, details TEXT)""")
     con.commit(); con.close()
 
+init_db()       # also when started with "flask run" instead of "python app.py"
+
 
 # ---------------------------------------------------------------- parsing
 def clean_version(spec):
     """'^4.17.1' -> '4.17.1'. Returns None if no usable version."""
     if not spec:
         return None
-    m = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", str(spec))
-    if not m or str(spec).startswith(("git", "http", "file", "link")):
+    spec = str(spec).strip()
+    # git/url/alias/workspace specs do not point at a registry version
+    if re.match(r"^(git|github:|gitlab:|bitbucket:|http|file:|link:|npm:|workspace:|portal:|patch:)", spec) \
+            or re.match(r"^[\w.\-]+/[\w.\-]+$", spec):
+        return None
+    m = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", spec)
+    if not m:
         return None
     return "%s.%s.%s" % (m.group(1), m.group(2) or 0, m.group(3) or 0)
 
@@ -54,7 +61,7 @@ def parse_requirements(text):
         line = line.split("#")[0].split(";")[0].strip()
         if not line or line.startswith("-"):
             continue
-        m = re.match(r"^([A-Za-z0-9_.\-]+)(\[.*?\])?\s*(==|>=|~=|<=)?\s*([\w.\-]*)", line)
+        m = re.match(r"^([A-Za-z0-9_.\-]+)(\[.*?\])?\s*(===|==|>=|~=|<=)?\s*([\w.\-]*)", line)
         if not m:
             continue
         ver = clean_version(m.group(4)) if m.group(3) else None
@@ -79,7 +86,7 @@ def fetch_latest(name, eco):
             d = r.json()
             latest = d["dist-tags"]["latest"]
             return latest, days_since(d["time"][latest])
-        r = requests.get("https://pypi.org/pypi/%s/json" % name, timeout=20, headers=HEADERS)
+        r = requests.get("https://pypi.org/pypi/%s/json" % quote(name, safe=""), timeout=20, headers=HEADERS)
         d = r.json()
         latest = d["info"]["version"]
         files = d.get("urls") or []
@@ -154,11 +161,16 @@ def github_files(url):
     m = re.search(r"github\.com/([^/\s]+)/([^/\s#?]+)", url)
     if not m:
         raise ValueError("Please enter a valid GitHub repository URL.")
-    owner, repo = m.group(1), m.group(2).replace(".git", "")
+    owner, repo = m.group(1), re.sub(r"\.git$", "", m.group(2))
     deps, sources = [], {}
+    headers = dict(HEADERS)
+    if os.environ.get("GITHUB_TOKEN"):          # optional: avoids the low anonymous rate limit
+        headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
     for fname, parser in (("package.json", parse_package_json), ("requirements.txt", parse_requirements)):
         r = requests.get("https://api.github.com/repos/%s/%s/contents/%s" % (owner, repo, fname),
-                         timeout=20, headers=HEADERS)
+                         timeout=20, headers=headers)
+        if r.status_code in (403, 429) and r.headers.get("X-RateLimit-Remaining") == "0":
+            raise ValueError("GitHub rate limit reached. Set a GITHUB_TOKEN environment variable or try again later.")
         if r.status_code == 200:
             text = base64.b64decode(r.json()["content"]).decode("utf-8", "ignore")
             deps += parser(text)
@@ -211,21 +223,24 @@ def analyze():
 
         # change detection vs previous scan of same project
         con = db()
-        prev = con.execute("SELECT * FROM scans WHERE project=? ORDER BY id DESC LIMIT 1", (project,)).fetchone()
-        changes = None
-        if prev:
-            pd = json.loads(prev["details"])
-            pk = set(pd.get("vuln_keys", []))
-            changes = {"previous_health": prev["health"],
-                       "health_change": round(health - prev["health"], 1),
-                       "new_vulns": sorted(set(keys) - pk),
-                       "fixed_vulns": sorted(pk - set(keys)),
-                       "previous_date": prev["created"]}
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        con.execute("INSERT INTO scans(project,created,total,outdated,vulnerable,health,risk,details) VALUES(?,?,?,?,?,?,?,?)",
-                    (project, now, total, outdated, vulnerable, health, risk,
-                     json.dumps({"vuln_keys": keys})))
-        con.commit(); con.close()
+        try:
+            prev = con.execute("SELECT * FROM scans WHERE project=? ORDER BY id DESC LIMIT 1", (project,)).fetchone()
+            changes = None
+            if prev:
+                pd = json.loads(prev["details"])
+                pk = set(pd.get("vuln_keys", []))
+                changes = {"previous_health": prev["health"],
+                           "health_change": round(health - prev["health"], 1),
+                           "new_vulns": sorted(set(keys) - pk),
+                           "fixed_vulns": sorted(pk - set(keys)),
+                           "previous_date": prev["created"]}
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            con.execute("INSERT INTO scans(project,created,total,outdated,vulnerable,health,risk,details) VALUES(?,?,?,?,?,?,?,?)",
+                        (project, now, total, outdated, vulnerable, health, risk,
+                         json.dumps({"vuln_keys": keys})))
+            con.commit()
+        finally:
+            con.close()
 
         return jsonify({"project": project, "scanned_at": now, "total": total,
                         "outdated": outdated, "vulnerable": vulnerable,
@@ -267,13 +282,14 @@ def remediate():
 def history():
     project = request.args.get("project", "")
     con = db()
-    rows = con.execute("SELECT created,total,outdated,vulnerable,health,risk FROM scans WHERE project=? ORDER BY id",
-                       (project,)).fetchall()
-    con.close()
+    try:
+        rows = con.execute("SELECT created,total,outdated,vulnerable,health,risk FROM scans WHERE project=? ORDER BY id",
+                           (project,)).fetchall()
+    finally:
+        con.close()
     return jsonify([dict(r) for r in rows])
 
 
 if __name__ == "__main__":
-    init_db()
     print("Open http://127.0.0.1:5000 in your browser")
     app.run(debug=False, port=5000)

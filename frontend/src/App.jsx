@@ -120,8 +120,12 @@ export default function App() {
       const res = await fetch("/api/analyze", { method: "POST", body: fd });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Analysis failed");
-      const h = await fetch(`/api/history?project=${encodeURIComponent(json.project)}`);
-      setHistory(await h.json());
+      try {
+        const h = await fetch(`/api/history?project=${encodeURIComponent(json.project)}`);
+        setHistory(await h.json());
+      } catch {
+        setHistory([]);
+      }
       setData(json);
       setFilter("All");
       setQuery("");
@@ -342,9 +346,9 @@ export default function App() {
               )}
             </section>
 
-            <TransitiveAnalysis trans={trans} loading={transLoading} error={transError} />
+            <TransitiveAnalysis key={data.scanned_at} trans={trans} loading={transLoading} error={transError} />
 
-            <Remediation data={data} trans={trans} transLoading={transLoading} />
+            <Remediation key={data.scanned_at} data={data} trans={trans} transLoading={transLoading} />
 
             {/* History + changes */}
             <section className="grid gap-6 md:grid-cols-2">

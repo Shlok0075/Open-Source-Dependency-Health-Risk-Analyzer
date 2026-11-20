@@ -68,7 +68,7 @@ export default function Remediation({ data, trans, transLoading }) {
 
   // Ask the backend to rewrite the dependency file(s) whenever the selection changes.
   useEffect(() => {
-    if (!chosen.length) { setOut({}); return; }
+    if (!chosen.length) { setOut({}); setErr(""); return; }
     let stale = false;
     fetch("/api/remediate", {
       method: "POST",

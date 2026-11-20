@@ -251,5 +251,39 @@ class Routes(Net):
         self.assertEqual(body["sources"], {"package.json": pkg})
 
 
+class RegressionFixes(Net):
+    def test_clean_version_ignores_non_registry_specs(self):
+        for spec in ("npm:other@1.2.3", "github:user/repo2", "user/repo", "workspace:*", "git+https://x/y.git#v1"):
+            self.assertIsNone(app_module.clean_version(spec), spec)
+        self.assertEqual(app_module.clean_version("^4.17.1"), "4.17.1")
+
+    def test_github_repo_name_keeps_dots(self):
+        seen = []
+        def fake(url, **kw):
+            seen.append(url)
+            return mock.Mock(status_code=404, headers={})
+        with mock.patch("app.requests.get", side_effect=fake):
+            with self.assertRaises(ValueError):
+                app_module.github_files("https://github.com/me/my.github.io.git")
+        self.assertIn("/repos/me/my.github.io/contents/package.json", seen[0])
+
+    def test_no_change_means_no_diff(self):
+        pkg = '{\n  "dependencies": {"a": "^2.0.0"},\n  "x": [1,2]\n}\n'
+        self.assertEqual(apply_fixes({"package.json": pkg}, [{"name": "a", "eco": "npm", "target": "1.0.0"}]), {})
+
+    def test_crlf_is_preserved(self):
+        txt = "flask==1.0\r\nrequests==2.0\r\n"
+        out = apply_fixes({"requirements.txt": txt}, [{"name": "flask", "eco": "PyPI", "target": "2.0.0"}])
+        self.assertEqual(out["requirements.txt"]["updated"], "flask==2.0.0\r\nrequests==2.0\r\n")
+
+    def test_fix_is_not_marked_verified_when_osv_is_down(self):
+        vulns = [{"id": "X", "severity": "HIGH", "summary": "", "fixed": ["1.1.0"]}]
+        with mock.patch("remediation.fetch_vulns", side_effect=RuntimeError("down")):
+            fix = suggest_fix("tough", "npm", "1.0.0", vulns)
+        self.assertEqual(fix["target"], "1.1.0")
+        self.assertFalse(fix["verified"])
+        self.assertIn("Could not re-check", fix["note"])
+
+
 if __name__ == "__main__":
     unittest.main()

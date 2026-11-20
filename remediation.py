@@ -28,11 +28,16 @@ def suggest_fix(name, eco, cur, vulns, latest=None):
         return None
 
     tried, best = set(), None          # best = (remaining_vulns, version)
+    unchecked = set()                  # versions OSV could not be asked about
 
     def check(version):
         nonlocal best
         tried.add(version)
-        rem = fetch_vulns(name, version, eco)
+        try:
+            rem = fetch_vulns(name, version, eco, strict=True)
+        except Exception:
+            rem = []
+            unchecked.add(version)
         if best is None or len(rem) < len(best[0]):
             best = (rem, version)
         return rem
@@ -59,11 +64,15 @@ def suggest_fix(name, eco, cur, vulns, latest=None):
                                   "consider an alternative package.")
     rem, target = best
     still = {v["id"] for v in rem}
+    notes = []
+    if bump_type(cur, target) == "major":
+        notes.append("Major upgrade - check the changelog for breaking changes.")
+    if target in unchecked:
+        notes.append("Could not re-check this version against the vulnerability database.")
     return dict(base, target=target, bump=bump_type(cur, target),
-                verified=not rem, remaining=len(rem),
+                verified=not rem and target not in unchecked, remaining=len(rem),
                 fixes=sum(1 for v in vulns if v["id"] not in still),
-                note=("Major upgrade - check the changelog for breaking changes."
-                      if bump_type(cur, target) == "major" else ""))
+                note=" ".join(notes))
 
 
 # ------------------------------------------------------------ editing the files
@@ -110,7 +119,9 @@ def _apply_package_json(text, updates):
             ov[name] = target
             changes.append({"name": name, "from": old or "(nested)", "to": target, "how": "override"})
     out = json.dumps(data, indent=_indent_of(text), ensure_ascii=False)
-    return out + ("\n" if text.endswith("\n") else ""), changes, skipped
+    nl = "\r\n" if "\r\n" in text else "\n"
+    out = out.replace("\n", nl)
+    return out + (nl if text.endswith("\n") else ""), changes, skipped
 
 
 REQ_LINE = re.compile(r"^(\s*)([A-Za-z0-9_.\-]+)(\[[^\]]*\])?\s*([^;#]*?)\s*(;[^#]*?)?\s*(#.*)?$")
@@ -164,7 +175,8 @@ def _apply_requirements(text, updates):
             lines.append("")
         lines.append("# Pinned to fix vulnerable nested dependencies")
         lines.extend(added)
-    return "\n".join(lines) + ("\n" if text.endswith("\n") or added else ""), changes, skipped
+    nl = "\r\n" if "\r\n" in text else "\n"
+    return nl.join(lines) + (nl if text.endswith("\n") or added else ""), changes, skipped
 
 
 def apply_fixes(files, updates):
@@ -189,7 +201,7 @@ def apply_fixes(files, updates):
             continue
         apply = _apply_package_json if eco == "npm" else _apply_requirements
         updated, changes, skipped = apply(text, mine)
-        if updated == text and not skipped:
+        if not changes and not skipped:     # nothing to change (also avoids reformatting noise)
             continue
         diff = "\n".join(difflib.unified_diff(
             text.splitlines(), updated.splitlines(),
