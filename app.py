@@ -183,7 +183,10 @@ def github_files(url):
 # ---------------------------------------------------------------- routes
 @app.route("/")
 def home():
-    return send_from_directory("static", "index.html")
+    built = os.path.join(app.static_folder, "app", "index.html")
+    if os.path.exists(built):                      # React UI (cd frontend && npm run build)
+        return send_from_directory(os.path.join(app.static_folder, "app"), "index.html")
+    return send_from_directory("static", "index.html")   # simple fallback page
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze():

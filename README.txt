@@ -16,5 +16,8 @@ New features
    package.json or requirements.txt, and lets you preview the diff and download it.
    Nested packages are fixed with npm "overrides" or a pinned line in requirements.txt.
 
-Both are in the page served by app.py and in the React UI (cd frontend, npm install, npm run dev).
+The new React UI is prebuilt in static/app and served by app.py at http://127.0.0.1:5000.
+To change the UI: cd frontend, npm install, npm run dev (live reload), then npm run build
+(writes the result to static/app). If static/app is missing, app.py falls back to the simple
+page in static/index.html.
 Run the tests (no internet needed):  python -m unittest discover -s tests -v

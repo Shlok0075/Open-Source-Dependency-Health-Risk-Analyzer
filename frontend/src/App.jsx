@@ -68,6 +68,50 @@ function ScoreRing({ value }) {
   );
 }
 
+function EmptyState({ onDemo }) {
+  const steps = [
+    ["1", "Scan", "Paste a GitHub repo or upload package.json / requirements.txt.", "#4f46e5"],
+    ["2", "Understand", "See health scores, outdated packages and vulnerabilities, including nested ones.", "#7c3aed"],
+    ["3", "Fix", "Get the smallest safe versions and download the updated file.", "#db2777"],
+  ];
+  return (
+    <section className="rise rounded-2xl bg-white p-8 shadow-sm">
+      <h2 className="text-xl font-bold">How it works</h2>
+      <div className="mt-5 grid gap-4 md:grid-cols-3">
+        {steps.map(([n, title, text, color]) => (
+          <div key={n} className="rounded-xl border border-slate-200 p-5 transition hover:-translate-y-0.5 hover:shadow-md">
+            <span className="flex h-8 w-8 items-center justify-center rounded-full text-sm font-bold text-white" style={{ background: color }}>{n}</span>
+            <p className="mt-3 font-semibold">{title}</p>
+            <p className="mt-1 text-sm text-slate-500">{text}</p>
+          </div>
+        ))}
+      </div>
+      <button onClick={onDemo} className="mt-6 rounded-lg px-5 py-2.5 text-sm font-semibold text-white shadow hover:opacity-90" style={{ background: GRADIENT }}>
+        Try it with a demo project
+      </button>
+    </section>
+  );
+}
+
+function Skeleton() {
+  const bar = "animate-pulse rounded-lg bg-slate-200";
+  return (
+    <div className="space-y-6" aria-busy="true">
+      <section className="flex items-center gap-6 rounded-2xl bg-white p-6 shadow-sm">
+        <div className={`${bar} h-36 w-36 rounded-full`} />
+        <div className="flex-1 space-y-3">
+          <div className={`${bar} h-7 w-1/3`} />
+          <div className={`${bar} h-4 w-2/3`} />
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => <div key={i} className={`${bar} h-16`} />)}
+          </div>
+        </div>
+      </section>
+      <div className={`${bar} h-56 bg-white`} />
+    </div>
+  );
+}
+
 export default function App() {
   const [mode, setMode] = useState("github");
   const [url, setUrl] = useState("");
@@ -208,11 +252,16 @@ export default function App() {
   return (
     <div className="min-h-screen pb-16">
       {/* Hero */}
-      <header style={{ background: GRADIENT }} className="px-6 pb-24 pt-10 text-white">
-        <div className="mx-auto max-w-6xl">
-          <h1 className="text-3xl font-bold tracking-tight">Dependency Analyzer</h1>
-          <p className="mt-2 max-w-xl text-white/80">
-            Scan a project, see which open-source packages are risky, outdated or neglected, and know what to fix first.
+      <header style={{ background: GRADIENT }} className="relative overflow-hidden px-6 pb-28 pt-12 text-white">
+        <div className="pointer-events-none absolute -right-24 -top-24 h-80 w-80 rounded-full bg-white/10 blur-2xl" />
+        <div className="pointer-events-none absolute -bottom-32 left-1/3 h-72 w-72 rounded-full bg-fuchsia-300/20 blur-3xl" />
+        <div className="relative mx-auto max-w-6xl">
+          <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold tracking-wide backdrop-blur">
+            Open-source supply-chain health
+          </span>
+          <h1 className="mt-4 text-4xl font-extrabold tracking-tight md:text-5xl">Dependency Analyzer</h1>
+          <p className="mt-3 max-w-xl text-lg text-white/85">
+            Find risky, outdated and neglected packages, including the hidden ones nested deep in your tree, and fix them in one click.
           </p>
         </div>
       </header>
@@ -270,6 +319,9 @@ export default function App() {
           {loading && <p className="mt-3 text-sm text-slate-500">Checking registries and the vulnerability database. This can take up to a minute.</p>}
           {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
         </section>
+
+        {!data && !loading && <EmptyState onDemo={runDemo} />}
+        {!data && loading && <Skeleton />}
 
         {data && (
           <div className="rise space-y-6">
