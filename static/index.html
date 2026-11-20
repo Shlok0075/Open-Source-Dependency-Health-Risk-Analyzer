@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dependency Health & Risk Analyzer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f4f5f7;color:#222}
+  header{background:#b51f2a;color:#fff;padding:18px 28px}
+  header h1{margin:0;font-size:22px} header p{margin:4px 0 0;font-size:13px;opacity:.9}
+  main{max-width:1100px;margin:20px auto;padding:0 16px}
+  .card{background:#fff;border-radius:10px;padding:18px;margin-bottom:18px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+  label{font-size:12px;font-weight:600;display:block;margin-bottom:4px}
+  input[type=text],input[type=file]{padding:8px;border:1px solid #ccc;border-radius:6px;min-width:240px}
+  button{background:#b51f2a;color:#fff;border:0;padding:10px 18px;border-radius:6px;cursor:pointer;font-weight:600}
+  button.sec{background:#444} button:disabled{opacity:.5}
+  .or{font-weight:700;color:#888;padding-bottom:8px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .stat{background:#fafafa;border:1px solid #eee;border-radius:8px;padding:12px;text-align:center}
+  .stat b{display:block;font-size:26px} .stat span{font-size:12px;color:#666}
+  .badge{padding:3px 9px;border-radius:12px;font-size:12px;font-weight:700;color:#fff}
+  .Low{background:#2e9e5b}.Medium{background:#e69a10}.High{background:#d62d3a}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}
+  th{background:#f0f0f0}
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:700px){.charts{grid-template-columns:1fr}}
+  .err{background:#fde8ea;color:#a1121d;padding:10px;border-radius:6px;display:none}
+  .hidden{display:none} ul{margin:4px 0;padding-left:18px}
+  .good{color:#2e9e5b;font-weight:700}.bad{color:#d62d3a;font-weight:700}
+  .bar{height:8px;background:#eee;border-radius:4px;min-width:70px}.bar i{display:block;height:8px;border-radius:4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Open-Source Dependency Health &amp; Risk Analyzer</h1>
+  <p>SLRTCE - Department of Information Technology</p>
+</header>
+<main>
+  <div class="card">
+    <div class="row">
+      <div><label>Project name (optional)</label><input type="text" id="project" placeholder="my-project"></div>
+      <div><label>GitHub repository URL</label><input type="text" id="url" placeholder="https://github.com/expressjs/express"></div>
+      <div class="or">OR</div>
+      <div><label>Upload package.json / requirements.txt</label><input type="file" id="file"></div>
+      <button id="go" onclick="analyze()">Analyze</button>
+    </div>
+    <p id="msg" style="font-size:13px;color:#555"></p>
+    <div id="err" class="err"></div>
+  </div>
+
+  <div id="result" class="hidden">
+    <div class="card">
+      <h3 id="title" style="margin-top:0"></h3>
+      <div class="stats" id="stats"></div>
+      <p style="margin-bottom:0">
+        <button class="sec" onclick="exportCSV()">Download CSV</button>
+        <button class="sec" onclick="exportJSON()">Download JSON</button>
+        <button class="sec" onclick="window.print()">Print / Save as PDF</button>
+      </p>
+    </div>
+
+    <div class="charts">
+      <div class="card"><h4 style="margin-top:0">Risk distribution</h4><canvas id="pie" height="200"></canvas></div>
+      <div class="card"><h4 style="margin-top:0">Health history (all scans)</h4><canvas id="line" height="200"></canvas></div>
+    </div>
+
+    <div class="card" id="changes"></div>
+
+    <div class="card">
+      <h4 style="margin-top:0">Dependencies (highest priority first)</h4>
+      <div style="overflow-x:auto"><table>
+        <thead><tr><th>Package</th><th>Current</th><th>Latest</th><th>Vulns</th><th>Health</th><th>Risk</th><th>Recommendation</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table></div>
+    </div>
+  </div>
+</main>
+
+<script>
+let DATA = null, pie = null, line = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function analyze(){
+  $('err').style.display = 'none';
+  const fd = new FormData();
+  fd.append('project', $('project').value);
+  fd.append('github_url', $('url').value);
+  if ($('file').files[0]) fd.append('file', $('file').files[0]);
+  $('go').disabled = true;
+  $('msg').textContent = 'Analyzing... checking registries and vulnerability database (10-40 seconds).';
+  try{
+    const r = await fetch('/api/analyze', {method:'POST', body: fd});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || 'Failed');
+    DATA = d; render(d);
+    $('msg').textContent = 'Done.';
+  }catch(e){
+    $('err').textContent = e.message; $('err').style.display = 'block';
+    $('msg').textContent = '';
+  }
+  $('go').disabled = false;
+}
+
+async function render(d){
+  $('result').classList.remove('hidden');
+  $('title').innerHTML = esc(d.project) + ' &nbsp; <span class="badge '+d.risk+'">'+d.risk+' risk</span> <small style="color:#888;font-weight:400">scanned '+d.scanned_at+'</small>';
+  $('stats').innerHTML =
+    stat(d.health+' / 100','Overall health score') + stat(d.total,'Total dependencies') +
+    stat(d.outdated,'Outdated') + stat(d.vulnerable,'Vulnerable');
+
+  $('rows').innerHTML = d.dependencies.map(x => {
+    const col = x.health>=75?'#2e9e5b':x.health>=50?'#e69a10':'#d62d3a';
+    const vul = x.vulns.length ? x.vulns.map(v=>esc(v.id)+' ('+v.severity+')').join('<br>') : '<span class="good">None</span>';
+    return '<tr><td><b>'+esc(x.name)+'</b><br><small>'+x.eco+(x.dev?' (dev)':'')+'</small></td>'+
+      '<td>'+esc(x.current)+'</td><td>'+esc(x.latest)+(x.outdated?' <span class="bad">&#9650;</span>':'')+'</td>'+
+      '<td><small>'+vul+'</small></td>'+
+      '<td>'+x.health+'<div class="bar"><i style="width:'+x.health+'%;background:'+col+'"></i></div></td>'+
+      '<td><span class="badge '+x.risk+'">'+x.risk+'</span></td>'+
+      '<td><ul>'+x.recommendations.map(r=>'<li>'+esc(r)+'</li>').join('')+'</ul></td></tr>';
+  }).join('');
+
+  const cnt = {Low:0,Medium:0,High:0};
+  d.dependencies.forEach(x => cnt[x.risk]++);
+  if(pie) pie.destroy();
+  pie = new Chart($('pie'), {type:'doughnut',
+    data:{labels:['Low','Medium','High'],datasets:[{data:[cnt.Low,cnt.Medium,cnt.High],backgroundColor:['#2e9e5b','#e69a10','#d62d3a']}]}});
+
+  const h = await (await fetch('/api/history?project='+encodeURIComponent(d.project))).json();
+  if(line) line.destroy();
+  line = new Chart($('line'), {type:'line',
+    data:{labels:h.map(x=>x.created),datasets:[{label:'Health score',data:h.map(x=>x.health),borderColor:'#b51f2a',tension:.3}]},
+    options:{scales:{y:{min:0,max:100}}}});
+
+  const c = d.changes;
+  if(!c){ $('changes').innerHTML = '<h4 style="margin-top:0">Change detection</h4><p>First scan of this project. Scan again later to see changes.</p>'; }
+  else{
+    const up = c.health_change >= 0;
+    $('changes').innerHTML = '<h4 style="margin-top:0">Change detection (vs scan on '+c.previous_date+')</h4>'+
+      '<p>Health: '+c.previous_health+' &rarr; '+d.health+' <span class="'+(up?'good':'bad')+'">('+(up?'+':'')+c.health_change+', '+(up?'improving':'getting worse')+')</span></p>'+
+      '<p><b>New vulnerabilities:</b> '+(c.new_vulns.length?esc(c.new_vulns.join(', ')):'none')+'</p>'+
+      '<p><b>Fixed vulnerabilities:</b> '+(c.fixed_vulns.length?esc(c.fixed_vulns.join(', ')):'none')+'</p>';
+  }
+}
+const stat = (v,l) => '<div class="stat"><b>'+v+'</b><span>'+l+'</span></div>';
+
+function download(name, text, type){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text],{type}));
+  a.download = name; a.click();
+}
+function exportJSON(){ download(DATA.project+'-report.json', JSON.stringify(DATA,null,2), 'application/json'); }
+function exportCSV(){
+  const rows = [['Package','Ecosystem','Current','Latest','Outdated','Vulnerabilities','Health','Risk','Recommendation']];
+  DATA.dependencies.forEach(x => rows.push([x.name,x.eco,x.current,x.latest,x.outdated,x.vulns.length,x.health,x.risk,x.recommendations.join(' | ')]));
+  download(DATA.project+'-report.csv', rows.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n'), 'text/csv');
+}
+</script>
+</body>
+</html>

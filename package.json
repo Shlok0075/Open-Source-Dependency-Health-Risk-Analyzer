@@ -1,0 +1,13 @@
+{
+  "name": "demo-app",
+  "dependencies": {
+    "express": "4.16.0",
+    "lodash": "4.17.15",
+    "react": "^17.0.2",
+    "axios": "0.21.0",
+    "moment": "2.29.1"
+  },
+  "devDependencies": {
+    "jest": "^26.0.0"
+  }
+}
