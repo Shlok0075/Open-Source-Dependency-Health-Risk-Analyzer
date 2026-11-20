@@ -1,19 +1,16 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 import {
   CartesianGrid, Cell, Line, LineChart, Pie, PieChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
+import { CopyButton, SEV_CHIP, SevChips, download } from "./ui.jsx";
+import TransitiveAnalysis from "./features/TransitiveAnalysis.jsx";
+import Remediation from "./features/Remediation.jsx";
 
 const RISK = {
   Low: { hex: "#10b981", chip: "bg-emerald-100 text-emerald-700" },
   Medium: { hex: "#f59e0b", chip: "bg-amber-100 text-amber-700" },
   High: { hex: "#ef4444", chip: "bg-red-100 text-red-700" },
-};
-const SEV_CHIP = {
-  CRITICAL: "bg-red-600 text-white",
-  HIGH: "bg-red-100 text-red-700",
-  MODERATE: "bg-amber-100 text-amber-700",
-  LOW: "bg-sky-100 text-sky-700",
 };
 const scoreColor = (s) => (s >= 75 ? "#10b981" : s >= 50 ? "#f59e0b" : "#ef4444");
 const GRADIENT = "linear-gradient(120deg, #4f46e5 0%, #7c3aed 50%, #db2777 100%)";
@@ -22,13 +19,6 @@ const DEMO = {
   name: "demo-app",
   dependencies: { express: "4.16.0", lodash: "4.17.15", react: "^17.0.2", axios: "0.21.0", moment: "2.29.1" },
 };
-
-function download(name, text, type) {
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([text], { type }));
-  a.download = name;
-  a.click();
-}
 
 const upgradeCmd = (d) =>
   d.latest === "unknown"
@@ -42,20 +32,6 @@ function RiskBadge({ risk }) {
     <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold ${RISK[risk].chip}`}>
       {risk}
     </span>
-  );
-}
-
-function SevChips({ sev }) {
-  const items = Object.entries(sev).filter(([, n]) => n > 0);
-  if (!items.length) return <span className="text-xs text-emerald-600">Clean</span>;
-  return (
-    <div className="flex flex-wrap gap-1">
-      {items.map(([k, n]) => (
-        <span key={k} className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ${SEV_CHIP[k]}`}>
-          {n} {k.toLowerCase()}
-        </span>
-      ))}
-    </div>
   );
 }
 
@@ -92,23 +68,6 @@ function ScoreRing({ value }) {
   );
 }
 
-function CopyButton({ text }) {
-  const [done, setDone] = useState(false);
-  return (
-    <button
-      onClick={(e) => {
-        e.stopPropagation();
-        navigator.clipboard.writeText(text);
-        setDone(true);
-        setTimeout(() => setDone(false), 1500);
-      }}
-      className="rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700"
-    >
-      {done ? "Copied" : "Copy command"}
-    </button>
-  );
-}
-
 export default function App() {
   const [mode, setMode] = useState("github");
   const [url, setUrl] = useState("");
@@ -122,8 +81,37 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(null);
   const [sort, setSort] = useState({ key: "health", dir: "asc" });
+  const [trans, setTrans] = useState(null);
+  const [transLoading, setTransLoading] = useState(false);
+  const [transError, setTransError] = useState("");
+  const transRun = useRef(0);   // ignores answers from an older scan
 
   const canSubmit = !loading && (mode === "github" ? url.trim() : file);
+
+  async function loadTransitive(result) {
+    const id = ++transRun.current;
+    setTrans(null);
+    setTransError("");
+    setTransLoading(true);
+    const deps = result.dependencies
+      .map((d) => ({
+        name: d.name, eco: d.eco, dev: d.dev,
+        version: d.current !== "unknown" ? d.current : d.latest !== "unknown" ? d.latest : null,
+      }))
+      .filter((d) => d.version);
+    try {
+      const res = await fetch("/api/transitive", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deps }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Nested dependency check failed");
+      if (id === transRun.current) setTrans(json);
+    } catch (err) {
+      if (id === transRun.current) setTransError(err.message);
+    } finally {
+      if (id === transRun.current) setTransLoading(false);
+    }
+  }
 
   async function run(fd) {
     setLoading(true);
@@ -138,6 +126,7 @@ export default function App() {
       setFilter("All");
       setQuery("");
       setOpen(null);
+      loadTransitive(json);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -157,7 +146,7 @@ export default function App() {
   function runDemo() {
     const fd = new FormData();
     fd.append("project", "demo-app");
-    fd.append("file", new File([JSON.stringify(DEMO)], "package.json", { type: "application/json" }));
+    fd.append("file", new File([JSON.stringify(DEMO, null, 2) + "\n"], "package.json", { type: "application/json" }));
     run(fd);
   }
 
@@ -352,6 +341,10 @@ export default function App() {
                 </div>
               )}
             </section>
+
+            <TransitiveAnalysis trans={trans} loading={transLoading} error={transError} />
+
+            <Remediation data={data} trans={trans} transLoading={transLoading} />
 
             {/* History + changes */}
             <section className="grid gap-6 md:grid-cols-2">

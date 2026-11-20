@@ -32,6 +32,18 @@
   .hidden{display:none} ul{margin:4px 0;padding-left:18px}
   .good{color:#2e9e5b;font-weight:700}.bad{color:#d62d3a;font-weight:700}
   .bar{height:8px;background:#eee;border-radius:4px;min-width:70px}.bar i{display:block;height:8px;border-radius:4px}
+  .tree details{margin-left:16px} .tree summary{cursor:pointer;padding:2px 4px;border-radius:4px}
+  .tree .leaf{margin-left:32px;padding:2px 4px}
+  .tree .vuln{background:#fde8ea;color:#a1121d;font-weight:600} .tree .parent{background:#fff4dc}
+  .tag{font-size:11px;padding:1px 6px;border-radius:8px;background:#eee;margin-left:4px}
+  .tag.r{background:#d62d3a;color:#fff} .tag.a{background:#e69a10;color:#fff}
+  .tag.patch{background:#2e9e5b;color:#fff} .tag.minor{background:#e69a10;color:#fff} .tag.major{background:#d62d3a;color:#fff}
+  .vcard{border:1px solid #eee;border-left:4px solid #d62d3a;border-radius:6px;padding:10px;margin-bottom:10px;font-size:13px}
+  .mono{font-family:Consolas,monospace;font-size:12px}
+  pre.diff{background:#1e1e1e;color:#ccc;padding:10px;border-radius:6px;max-height:320px;overflow:auto;font-size:12px;margin:8px 0}
+  pre.diff span{display:block}
+  pre.diff .add{background:#1e4620;color:#8fe39b} pre.diff .del{background:#4a1d1d;color:#f1a0a0}
+  pre.diff .hunk{color:#7cc4ff}
 </style>
 </head>
 <body>
@@ -70,6 +82,9 @@
 
     <div class="card" id="changes"></div>
 
+    <div class="card" id="trans"></div>
+    <div class="card" id="fix"></div>
+
     <div class="card">
       <h4 style="margin-top:0">Dependencies (highest priority first)</h4>
       <div style="overflow-x:auto"><table>
@@ -81,7 +96,8 @@
 </main>
 
 <script>
-let DATA = null, pie = null, line = null;
+let DATA = null, TRANS = null, TRANS_ERR = '', TRANS_LOADING = false, pie = null, line = null;
+let skipped = new Set(), fixRun = 0, transRun = 0;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -97,7 +113,7 @@ async function analyze(){
     const r = await fetch('/api/analyze', {method:'POST', body: fd});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || 'Failed');
-    DATA = d; render(d);
+    DATA = d; render(d); loadTransitive(d);
     $('msg').textContent = 'Done.';
   }catch(e){
     $('err').textContent = e.message; $('err').style.display = 'block';
@@ -159,6 +175,134 @@ function exportCSV(){
   DATA.dependencies.forEach(x => rows.push([x.name,x.eco,x.current,x.latest,x.outdated,x.vulns.length,x.health,x.risk,x.recommendations.join(' | ')]));
   download(DATA.project+'-report.csv', rows.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n'), 'text/csv');
 }
+
+// ============================================================ nested dependencies
+async function loadTransitive(d){
+  const id = ++transRun;
+  TRANS = null; TRANS_ERR = ''; TRANS_LOADING = true; skipped = new Set();
+  renderTrans(); renderFix();
+  const deps = d.dependencies.map(x => ({name:x.name, eco:x.eco, dev:x.dev,
+    version: x.current !== 'unknown' ? x.current : (x.latest !== 'unknown' ? x.latest : null)})).filter(x => x.version);
+  try{
+    const r = await fetch('/api/transitive', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({deps})});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error || 'Nested dependency check failed');
+    if(id === transRun) TRANS = j;
+  }catch(e){ if(id === transRun) TRANS_ERR = e.message; }
+  if(id !== transRun) return;
+  TRANS_LOADING = false;
+  renderTrans(); renderFix();
+}
+
+const sevChips = sev => Object.entries(sev).filter(([,n]) => n > 0)
+  .map(([k,n]) => '<span class="tag '+(k==='CRITICAL'||k==='HIGH'?'r':'a')+'">'+n+' '+k.toLowerCase()+'</span>').join('');
+
+function treeNode(n, onlyRisky){
+  const bad = n.vulns.length > 0;
+  const kids = onlyRisky ? n.children.filter(c => c.has_vuln_below || c.vulns.length) : n.children;
+  const cls = bad ? 'vuln' : (n.has_vuln_below ? 'parent' : '');
+  const label = esc(n.name)+' <small>'+esc(n.version)+'</small>'
+    + (bad ? sevChips(n.vulns.reduce((c,v)=>(c[v.severity]=(c[v.severity]||0)+1,c),{})) : '')
+    + (!bad && n.has_vuln_below ? '<span class="tag a">affected parent</span>' : '')
+    + (n.dup ? ' <small style="color:#999">(dependencies shown above)</small>' : '');
+  if(!kids.length) return '<div class="leaf '+cls+'">'+label+'</div>';
+  return '<details '+(n.has_vuln_below?'open':'')+'><summary class="'+cls+'">'+label+'</summary>'+kids.map(k=>treeNode(k,onlyRisky)).join('')+'</details>';
+}
+
+function renderTrans(){
+  const el = $('trans');
+  let h = '<h4 style="margin-top:0">Hidden risks in nested dependencies</h4>'
+    + '<p style="font-size:13px;color:#666;margin-top:-6px">Packages you never installed on purpose, but that come along with the ones you did.</p>';
+  if(TRANS_LOADING) h += '<p>Resolving the full dependency tree and checking every nested package...</p>';
+  if(TRANS_ERR) h += '<div class="err" style="display:block">'+esc(TRANS_ERR)+'</div>';
+  if(TRANS){
+    const s = TRANS.summary;
+    h += '<div class="stats">'+stat(s.direct_scanned,'Direct packages scanned')+stat(s.nested_packages,'Nested packages')
+       + stat(s.vulnerable_nested,'Vulnerable nested')+stat(s.affected_direct,'Parent packages affected')+'</div>';
+    if(TRANS.errors.length) h += '<p style="font-size:12px;color:#a66">Could not resolve the tree for: '+TRANS.errors.map(e=>esc(e.name)).join(', ')+'</p>';
+    if(!TRANS.vulnerable.length) h += '<p class="good">No known vulnerabilities in any nested package.</p>';
+    h += TRANS.vulnerable.map(v =>
+      '<div class="vcard"><b style="font-size:15px">'+esc(v.name)+'</b> '+esc(v.version)+' '+sevChips(v.sev)
+      + '<p style="margin:6px 0 2px"><b>How it got in:</b></p>'
+      + v.paths.map(p => '<div class="mono">'+p.map((x,i)=>i===p.length-1?'<b style="color:#d62d3a">'+esc(x)+'</b>':esc(x)).join(' &rarr; ')+'</div>').join('')
+      + '<p style="margin:6px 0 2px"><b>Affected packages:</b> '+v.affected_direct.map(a=>'<span class="tag a">'+esc(a)+'</span>').join(' ')
+      + ' <small>required directly by '+esc(v.parents.join(', '))+'</small></p>'
+      + '<small>'+v.vulns.map(x=>'<a href="https://osv.dev/vulnerability/'+encodeURIComponent(x.id)+'" target="_blank">'+esc(x.id)+'</a> ('+x.severity+')').join(' &middot; ')+'</small></div>').join('');
+    const only = $('onlyRisky') ? $('onlyRisky').checked : true;
+    h += '<p style="margin-bottom:4px"><b>Dependency tree</b> &nbsp; <label style="display:inline;font-weight:400"><input type="checkbox" id="onlyRisky" '+(only?'checked':'')+' onchange="renderTrans()"> only show branches with vulnerabilities</label></p>'
+       + '<div class="tree" style="max-height:420px;overflow:auto;border:1px solid #eee;border-radius:6px;padding:6px">'
+       + (TRANS.tree.filter(t=>!only||t.has_vuln_below).map(t=>treeNode(t,only)).join('') || '<p style="color:#888">Nothing to show. Untick the box to see the whole tree.</p>')
+       + '</div><small style="color:#888">Red = vulnerable package, orange = parent that pulls one in. The tree shows what each package installs on its own, so a real lock file may differ slightly.</small>';
+  }
+  el.innerHTML = h;
+}
+
+// ============================================================ fix & remediation
+function newer(a,b){
+  const n = v => (String(v).match(/\d+/g)||[]).slice(0,3).map(Number);
+  const x = n(a), y = n(b);
+  for(let i=0;i<3;i++) if((x[i]||0)!==(y[i]||0)) return (x[i]||0)>(y[i]||0);
+  return false;
+}
+function buildPlan(){
+  const map = new Map();
+  const add = it => {
+    const k = it.eco+':'+it.name, p = map.get(k);
+    if(!p) return map.set(k,it);
+    const best = it.target && (!p.target || newer(it.target,p.target)) ? it : p;
+    map.set(k, Object.assign({}, best, {kind: p.kind==='Direct'||it.kind==='Direct' ? 'Direct':'Nested'}));
+  };
+  DATA.dependencies.forEach(d => { if(d.fix) add(Object.assign({}, d.fix, {kind:'Direct', via:[]})); });
+  ((TRANS && TRANS.vulnerable) || []).forEach(v => { if(v.fix) add(Object.assign({}, v.fix, {kind:'Nested', via:v.affected_direct})); });
+  return [...map.values()];
+}
+function toggleFix(k){ skipped.has(k) ? skipped.delete(k) : skipped.add(k); renderFix(); }
+
+async function renderFix(){
+  const el = $('fix'), plan = buildPlan();
+  const fixable = plan.filter(p => p.target), no = plan.filter(p => !p.target);
+  const chosen = fixable.filter(p => !skipped.has(p.eco+':'+p.name));
+  let h = '<h4 style="margin-top:0">Automated fix plan</h4>'
+    + '<p style="font-size:13px;color:#666;margin-top:-6px">Smallest safe version for each vulnerable package, checked against the vulnerability database. Untick anything you want to skip.</p>';
+  if(!fixable.length && !no.length)
+    h += '<p class="good">'+(TRANS_LOADING ? 'Waiting for the nested dependency check...' : 'No vulnerable packages, so there is nothing to fix.')+'</p>';
+  if(fixable.length){
+    h += '<div style="overflow-x:auto"><table><thead><tr><th></th><th>Package</th><th>Current</th><th>Safe version</th><th>Change</th><th>Result</th></tr></thead><tbody>'
+      + fixable.map(p => { const k = p.eco+':'+p.name;
+          return '<tr style="'+(skipped.has(k)?'opacity:.4':'')+'"><td><input type="checkbox" '+(skipped.has(k)?'':'checked')+' onchange="toggleFix(\''+esc(k).replace(/'/g,"\\'")+'\')"></td>'
+          + '<td><b>'+esc(p.name)+'</b> <span class="tag">'+p.kind+(p.kind==='Nested'&&p.via.length?' via '+esc(p.via.slice(0,2).join(', ')):'')+'</span></td>'
+          + '<td style="color:#d62d3a;text-decoration:line-through">'+esc(p.current)+'</td><td class="good">'+esc(p.target)+'</td>'
+          + '<td><span class="tag '+p.bump+'">'+p.bump+'</span></td>'
+          + '<td><small>'+(p.verified ? 'Fixes '+p.fixes+' vulnerabilit'+(p.fixes===1?'y':'ies') : 'Fixes '+p.fixes+', '+p.remaining+' still open')+(p.note?'<br>'+esc(p.note):'')+'</small></td></tr>'; }).join('')
+      + '</tbody></table></div><p style="font-size:12px;color:#666">'+chosen.length+' of '+fixable.length+' fixes selected.'
+      + (chosen.some(p=>p.bump==='major') ? ' Major upgrades can break your code, so test after applying.' : '')+'</p>';
+  }
+  if(no.length) h += '<p style="background:#fff4dc;padding:8px;border-radius:6px;font-size:13px"><b>No patched version exists yet for:</b> '+no.map(p=>esc(p.name)+' '+esc(p.current)).join(', ')+'</p>';
+  h += '<div id="fixPreview"></div>';
+  el.innerHTML = h;
+  if(!chosen.length) return;
+
+  const id = ++fixRun;
+  try{
+    const r = await fetch('/api/remediate', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({files: DATA.sources, updates: chosen.map(p=>({name:p.name, eco:p.eco, target:p.target}))})});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error || 'Could not build the updated file');
+    if(id !== fixRun) return;
+    window.FIXED = j.files;
+    const names = Object.keys(j.files);
+    $('fixPreview').innerHTML = !names.length ? '<p>These versions are already in your file, so there is nothing to change.</p>' : names.map(n => {
+      const f = j.files[n];
+      const diff = f.diff.split('\n').map(l => '<span class="'+(l.startsWith('+++')||l.startsWith('---')?'':l.startsWith('+')?'add':l.startsWith('-')?'del':l.startsWith('@@')?'hunk':'')+'">'+esc(l||' ')+'</span>').join('');
+      return '<p style="margin-bottom:0"><b>'+esc(n)+'</b> &nbsp; <button onclick="downloadFixed(\''+esc(n)+'\')">Download updated '+esc(n)+'</button></p>'
+        + '<pre class="diff">'+diff+'</pre>'
+        + (f.changes.some(c=>c.how==='override') ? '<small>Nested packages are fixed with an <code>overrides</code> entry (npm 8.3 or newer). Run <code>npm install</code> afterwards to refresh your lock file.</small><br>' : '')
+        + (f.changes.some(c=>c.how==='pin') ? '<small>Nested packages are fixed by pinning them at the bottom of the file. Run <code>pip install -r</code> afterwards.</small><br>' : '')
+        + f.skipped.map(x=>'<small style="color:#a66">Skipped '+esc(x.name)+': '+esc(x.reason)+'</small><br>').join('');
+    }).join('');
+  }catch(e){ if(id === fixRun) $('fixPreview').innerHTML = '<div class="err" style="display:block">'+esc(e.message)+'</div>'; }
+}
+function downloadFixed(name){ download(name, window.FIXED[name].updated, 'text/plain'); }
 </script>
 </body>
 </html>

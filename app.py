@@ -1,14 +1,17 @@
 """Open-Source Dependency Health & Risk Analyzer  (Flask backend)"""
-import re, json, sqlite3, base64, datetime
+import os, re, json, sqlite3, base64, datetime
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 
+from common import HEADERS, vt, fetch_vulns
+from remediation import suggest_fix, apply_fixes
+from transitive import analyze_transitive
+
 app = Flask(__name__, static_folder="static")
 DB = "history.db"
 MAX_DEPS = 80
-HEADERS = {"User-Agent": "dependency-health-analyzer"}
 
 
 # ---------------------------------------------------------------- database
@@ -60,10 +63,6 @@ def parse_requirements(text):
 
 
 # ---------------------------------------------------------------- registries
-def vt(v):
-    nums = [int(x) for x in re.findall(r"\d+", v or "")][:3]
-    return tuple(nums + [0] * (3 - len(nums)))
-
 def days_since(iso):
     try:
         d = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -88,25 +87,6 @@ def fetch_latest(name, eco):
         return latest, days_since(when) if when else None
     except Exception:
         return None, None
-
-def fetch_vulns(name, version, eco):
-    """Ask OSV.dev (free) for known vulnerabilities of this exact version."""
-    if not version:
-        return []
-    try:
-        r = requests.post("https://api.osv.dev/v1/query", timeout=20, headers=HEADERS,
-                          json={"version": version, "package": {"name": name, "ecosystem": eco}})
-        found = []
-        for v in r.json().get("vulns", []):
-            sev = ((v.get("database_specific") or {}).get("severity") or "MODERATE").upper()
-            if sev == "MEDIUM":
-                sev = "MODERATE"
-            found.append({"id": v.get("id"), "severity": sev,
-                          "summary": (v.get("summary") or "")[:120]})
-        return found
-    except Exception:
-        return []
-
 
 # ---------------------------------------------------------------- scoring
 def analyze_dep(dep):
@@ -165,7 +145,8 @@ def analyze_dep(dep):
             "latest": latest or "unknown", "outdated": outdated, "days_since_release": age,
             "vulns": vulns, "sev": sev, "security": security, "freshness": freshness,
             "maintenance": maintenance, "health": health, "risk": risk,
-            "priority": round(100 - health, 1), "recommendations": recs}
+            "priority": round(100 - health, 1), "recommendations": recs,
+            "fix": suggest_fix(name, eco, cur, vulns, latest)}
 
 
 # ---------------------------------------------------------------- GitHub
@@ -174,16 +155,17 @@ def github_files(url):
     if not m:
         raise ValueError("Please enter a valid GitHub repository URL.")
     owner, repo = m.group(1), m.group(2).replace(".git", "")
-    deps = []
+    deps, sources = [], {}
     for fname, parser in (("package.json", parse_package_json), ("requirements.txt", parse_requirements)):
         r = requests.get("https://api.github.com/repos/%s/%s/contents/%s" % (owner, repo, fname),
                          timeout=20, headers=HEADERS)
         if r.status_code == 200:
             text = base64.b64decode(r.json()["content"]).decode("utf-8", "ignore")
             deps += parser(text)
+            sources[fname] = text
     if not deps:
         raise ValueError("No package.json or requirements.txt found in the root of that repo (or repo is private / rate limit hit).")
-    return repo, deps
+    return repo, deps, sources
 
 
 # ---------------------------------------------------------------- routes
@@ -198,15 +180,17 @@ def analyze():
         url = (request.form.get("github_url") or "").strip()
         file = request.files.get("file")
         if url:
-            repo, deps = github_files(url)
+            repo, deps, sources = github_files(url)
             project = project or repo
         elif file and file.filename:
             text = file.read().decode("utf-8", "ignore")
             fn = file.filename.lower()
             if fn.endswith(".json"):
                 deps = parse_package_json(text)
+                sources = {os.path.basename(file.filename) or "package.json": text}
             else:
                 deps = parse_requirements(text)
+                sources = {os.path.basename(file.filename) or "requirements.txt": text}
             project = project or "my-project"
         else:
             return jsonify({"error": "Provide a GitHub URL or upload a file."}), 400
@@ -246,11 +230,36 @@ def analyze():
         return jsonify({"project": project, "scanned_at": now, "total": total,
                         "outdated": outdated, "vulnerable": vulnerable,
                         "health": health, "risk": risk, "dependencies": results,
-                        "changes": changes})
+                        "changes": changes, "sources": sources})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except json.JSONDecodeError:
         return jsonify({"error": "That file is not valid JSON."}), 400
+    except Exception as e:
+        return jsonify({"error": "Something went wrong: %s" % e}), 500
+
+@app.route("/api/transitive", methods=["POST"])
+def transitive():
+    """Feature 1: dependency tree + vulnerable nested packages."""
+    try:
+        deps = (request.get_json(silent=True) or {}).get("deps") or []
+        if not deps:
+            return jsonify({"error": "No dependencies supplied."}), 400
+        return jsonify(analyze_transitive(deps[:MAX_DEPS]))
+    except Exception as e:
+        return jsonify({"error": "Something went wrong: %s" % e}), 500
+
+@app.route("/api/remediate", methods=["POST"])
+def remediate():
+    """Feature 2: build the updated dependency file(s) for the chosen fixes."""
+    try:
+        body = request.get_json(silent=True) or {}
+        files, updates = body.get("files") or {}, body.get("updates") or []
+        if not files:
+            return jsonify({"error": "No dependency file supplied."}), 400
+        return jsonify({"files": apply_fixes(files, updates)})
+    except json.JSONDecodeError:
+        return jsonify({"error": "The dependency file is not valid JSON."}), 400
     except Exception as e:
         return jsonify({"error": "Something went wrong: %s" % e}), 500
 
